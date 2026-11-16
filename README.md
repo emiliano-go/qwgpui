@@ -100,7 +100,12 @@ never writes vault contents to disk.
 - Secrets are masked by default, redacted in debug output, and zeroized on drop.
 - The clipboard is cleared only if it still holds the exact value Vault copied.
   A newer value from another app is never overwritten.
-- No shell strings are built and no credentials are logged.
+- Config lives in a 0700 directory with 0600 files. Favorites store IDs only.
+- rbw output is capped at 32 MiB, entry IDs are validated, and error text is
+  stripped of control characters and truncated.
+- Core dumps are disabled and the process is marked non-dumpable at startup.
+- No shell strings are built, no network calls are made, and no credentials are
+  logged.
 
 Clipboard clearing is best effort. Clipboard managers, history tools, and the
 receiving app may keep a copy. Vault does not claim secure erasure. Set
@@ -116,6 +121,9 @@ receiving app may keep a copy. Vault does not claim secure erasure. Set
 - Tray, global quick access, and start minimized need a background daemon.
 - Browser integration, focus monitoring, form detection, and typing are out of
   scope.
+- A compromised rbw binary, clipboard manager, or desktop session can still read
+  what the session can read. Vault reduces exposure, it cannot make a
+  compromised machine safe.
 
 ## Tests
 

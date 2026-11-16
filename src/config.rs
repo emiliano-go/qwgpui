@@ -1,7 +1,12 @@
 use std::fs;
-use std::path::PathBuf;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_FAVORITES_BYTES: u64 = 256 * 1024;
+const MAX_FAVORITES: usize = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -153,7 +158,9 @@ impl Config {
     /// Loads settings, returning defaults plus a human-readable notice on failure.
     /// Vault contents are never read or written here.
     pub fn load() -> (Self, Option<String>) {
-        match fs::read_to_string(config_path()) {
+        let _ = private_dir(&config_dir());
+        let _ = restrict_file(&config_path());
+        match read_limited(&config_path(), MAX_CONFIG_BYTES) {
             Ok(text) => match toml::from_str::<Self>(&text) {
                 Ok(config) => (config, None),
                 Err(err) => (
@@ -171,7 +178,7 @@ impl Config {
 
     pub fn save(&self) -> Result<(), String> {
         let dir = config_dir();
-        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        private_dir(&dir)?;
         let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
         write_atomic(&config_path(), &text)
     }
@@ -187,22 +194,104 @@ impl Config {
 }
 
 pub fn load_favorites() -> Vec<String> {
-    fs::read_to_string(favorites_path())
+    let _ = restrict_file(&favorites_path());
+    read_limited(&favorites_path(), MAX_FAVORITES_BYTES)
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .map(|mut ids| {
+            ids.retain(|id| is_safe_id(id));
+            ids.truncate(MAX_FAVORITES);
+            ids
+        })
         .unwrap_or_default()
 }
 
 pub fn save_favorites(favorites: &[String]) -> Result<(), String> {
     let dir = config_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let text = serde_json::to_string_pretty(favorites).map_err(|e| e.to_string())?;
+    private_dir(&dir)?;
+    let favorites: Vec<&String> = favorites
+        .iter()
+        .filter(|id| is_safe_id(id))
+        .take(MAX_FAVORITES)
+        .collect();
+    let text = serde_json::to_string_pretty(&favorites).map_err(|e| e.to_string())?;
     write_atomic(&favorites_path(), &text)
 }
 
-fn write_atomic(path: &PathBuf, contents: &str) -> Result<(), String> {
+fn is_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('-')
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+fn read_limited(path: &Path, max: u64) -> std::io::Result<String> {
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file is too large",
+        ));
+    }
+    let mut text = String::new();
+    file.take(max + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file is too large",
+        ));
+    }
+    Ok(text)
+}
+
+fn restrict_file(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if path.exists() {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn private_dir(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, contents).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write as _;
+        let mut file = options
+            .open(&tmp)
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
+    }
     fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
 }
 
@@ -219,9 +308,13 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     }
     fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let exe = std::env::current_exe().map_err(|e| format!("locate executable: {e}"))?;
+    let exe = exe
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
     let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=Vault\nComment=Bitwarden via rbw\nExec=\"{}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
-        exe.display()
+        "[Desktop Entry]\nType=Application\nName=Vault\nComment=Bitwarden via rbw\nExec=\"{exe}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
     );
     write_atomic(&path, &entry)
 }

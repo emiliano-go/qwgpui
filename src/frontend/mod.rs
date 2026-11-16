@@ -120,13 +120,13 @@ pub struct VaultApp {
     details: Option<ItemDetails>,
     details_loading: bool,
     show_password: bool,
-    totp: Option<String>,
+    totp: Option<Zeroizing<String>>,
     totp_remaining: u64,
     detail_generation: u64,
     toast: Option<Toast>,
     toast_seq: u64,
     screen: Screen,
-    generated: Option<String>,
+    generated: Option<Zeroizing<String>>,
     list_scroll: UniformListScrollHandle,
 }
 
@@ -519,7 +519,7 @@ impl VaultApp {
                         return false;
                     }
                     match result {
-                        Ok(code) => this.totp = Some(code),
+                        Ok(code) => this.totp = Some(Zeroizing::new(code)),
                         Err(_) => this.totp = None,
                     }
                     this.totp_remaining = remaining_totp_seconds();
@@ -567,14 +567,14 @@ impl VaultApp {
         match field {
             CopyField::Username => {
                 if let Some(username) = meta.username.clone() {
-                    self.copy_value(username, "Username copied", cx);
+                    self.copy_value(Zeroizing::new(username), "Username copied", cx);
                 } else {
                     self.copy_fetched(meta.id, field, cx);
                 }
             }
             CopyField::Totp => {
-                if let Some(code) = self.totp.clone() {
-                    self.copy_value(code, "TOTP copied", cx);
+                if let Some(code) = self.totp.as_ref() {
+                    self.copy_value(Zeroizing::new(code.to_string()), "TOTP copied", cx);
                 } else {
                     self.copy_fetched(meta.id, field, cx);
                 }
@@ -586,18 +586,20 @@ impl VaultApp {
     fn copy_fetched(&mut self, id: String, field: CopyField, cx: &mut Context<Self>) {
         let backend = self.backend.clone();
         cx.spawn(async move |weak, cx| {
-            let value = match field {
+            let value: Result<Zeroizing<String>, VaultError> = match field {
                 CopyField::Password => backend.get_item(id.clone()).await.map(|item| {
-                    item.password
-                        .as_ref()
-                        .map(|password| password.expose().to_string())
-                        .unwrap_or_default()
+                    Zeroizing::new(
+                        item.password
+                            .as_ref()
+                            .map(|password| password.expose().to_string())
+                            .unwrap_or_default(),
+                    )
                 }),
                 CopyField::Username => backend
                     .get_item(id.clone())
                     .await
-                    .map(|item| item.username.unwrap_or_default()),
-                CopyField::Totp => backend.get_totp(id.clone()).await,
+                    .map(|item| Zeroizing::new(item.username.clone().unwrap_or_default())),
+                CopyField::Totp => backend.get_totp(id.clone()).await.map(Zeroizing::new),
             };
             let _ = weak.update(cx, |this, cx| match value {
                 Ok(value) if !value.is_empty() => {
@@ -618,13 +620,13 @@ impl VaultApp {
         .detach();
     }
 
-    fn copy_value(&mut self, value: String, label: &str, cx: &mut Context<Self>) {
+    fn copy_value(&mut self, value: Zeroizing<String>, label: &str, cx: &mut Context<Self>) {
         if value.is_empty() {
             self.show_toast("Nothing to copy", cx);
             return;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
-        self.clipboard.remember(&value);
+        cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
+        self.clipboard.remember(value.as_str());
         self.notify(
             format!(
                 "{label} — clears in {}s",
@@ -638,15 +640,14 @@ impl VaultApp {
             self.clipboard.forget();
             return;
         }
-        let expected = Zeroizing::new(value);
+        let expected = value;
         cx.spawn(async move |weak, cx| {
             Timer::after(Duration::from_secs(timeout)).await;
-            let expected = expected;
             let _ = weak.update(cx, |this, cx| {
                 let current = cx.read_from_clipboard().and_then(|item| item.text());
+                this.clipboard.forget_if_matches(expected.as_str());
                 if should_clear(current.as_deref(), expected.as_str()) {
                     cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-                    this.clipboard.forget_if_matches(expected.as_str());
                     this.notify("Clipboard cleared", cx);
                 }
             });
@@ -746,7 +747,7 @@ impl VaultApp {
     }
 
     fn push_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.screen != Screen::Vault {
+        if self.screen != Screen::Vault || self.query.len() >= 512 {
             return;
         }
         self.query.push_str(text);
@@ -759,7 +760,7 @@ impl VaultApp {
 
     fn generate_password(&mut self, cx: &mut Context<Self>) {
         match password::generate(&self.config.generator) {
-            Ok(generated) => self.generated = Some(generated),
+            Ok(generated) => self.generated = Some(Zeroizing::new(generated)),
             Err(err) => self.show_toast(err, cx),
         }
         cx.notify();
@@ -1162,7 +1163,7 @@ impl VaultApp {
                             .truncate()
                             .text_size(px(16.))
                             .text_color(rgba(p.text))
-                            .child(item.name.clone()),
+                            .child(truncate_text(item.name.clone(), 200)),
                     )
                     .child(
                         div()
@@ -1293,13 +1294,13 @@ impl VaultApp {
                         div()
                             .text_size(px(28.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(details.name.clone()),
+                            .child(truncate_text(details.name.clone(), 200)),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
                             .text_color(rgba(p.muted))
-                            .child(meta_line),
+                            .child(truncate_text(meta_line, 300)),
                     )
                     .child(
                         div()
@@ -1336,7 +1337,10 @@ impl VaultApp {
             body = body.child(detail_field(
                 p,
                 "Password",
-                div().text_size(px(16.)).truncate().child(password_text),
+                div()
+                    .text_size(px(16.))
+                    .truncate()
+                    .child(truncate_text(password_text, 200)),
                 div()
                     .flex()
                     .gap_1()
@@ -1372,14 +1376,18 @@ impl VaultApp {
                         .truncate()
                         .text_size(px(15.))
                         .text_color(rgba(p.accent_text))
-                        .child(uri.clone()),
+                        .child(truncate_text(uri.clone(), 300)),
                 );
             }
             body = body.child(detail_field(p, "Website", uris, div()));
         }
 
         if has_totp {
-            let code = self.totp.clone().unwrap_or_else(|| "…".into());
+            let code = self
+                .totp
+                .as_ref()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "…".into());
             body = body.child(detail_field(
                 p,
                 "TOTP",
@@ -1410,7 +1418,7 @@ impl VaultApp {
                     .whitespace_normal()
                     .text_size(px(15.))
                     .text_color(rgba(p.text2))
-                    .child(notes.clone()),
+                    .child(truncate_text(notes.clone(), 20_000)),
                 icon_button(p, "icons/copy.svg", p.muted)
                     .id("details-notes-copy")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1419,7 +1427,7 @@ impl VaultApp {
                             .as_ref()
                             .and_then(|details| details.notes.clone())
                         {
-                            this.copy_value(notes, "Notes copied", cx);
+                            this.copy_value(Zeroizing::new(notes), "Notes copied", cx);
                         }
                     })),
             ));
@@ -1842,18 +1850,23 @@ impl VaultApp {
                             .border_color(rgba(p.border_strong))
                             .shadow_sm()
                             .child(
-                                div()
-                                    .flex_1()
-                                    .truncate()
-                                    .text_size(px(22.))
-                                    .child(self.generated.clone().unwrap_or_else(|| "—".into())),
+                                div().flex_1().truncate().text_size(px(22.)).child(
+                                    self.generated
+                                        .as_ref()
+                                        .map(|value| value.to_string())
+                                        .unwrap_or_else(|| "—".into()),
+                                ),
                             )
                             .child(
                                 primary_icon_button(p, "icons/copy.svg", "Copy")
                                     .id("generator-copy")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(value) = this.generated.clone() {
-                                            this.copy_value(value, "Generated password copied", cx);
+                                        if let Some(value) = this.generated.as_ref() {
+                                            this.copy_value(
+                                                Zeroizing::new(value.to_string()),
+                                                "Generated password copied",
+                                                cx,
+                                            );
                                         }
                                     })),
                             ),

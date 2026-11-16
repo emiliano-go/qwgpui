@@ -91,6 +91,17 @@ pub struct ItemDetails {
     pub has_totp: bool,
 }
 
+impl Drop for ItemDetails {
+    fn drop(&mut self) {
+        if let Some(username) = &mut self.username {
+            username.zeroize();
+        }
+        if let Some(notes) = &mut self.notes {
+            notes.zeroize();
+        }
+    }
+}
+
 impl fmt::Debug for ItemDetails {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ItemDetails")

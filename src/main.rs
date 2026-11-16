@@ -15,7 +15,25 @@ use gpui::{
 
 use crate::frontend::VaultApp;
 
+#[cfg(target_os = "linux")]
+fn harden_process() {
+    let limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // Never write vault-adjacent memory to core dumps, and refuse privilege
+    // gains from setuid helpers spawned by the process tree.
+    unsafe {
+        libc::setrlimit(libc::RLIMIT_CORE, &limit);
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    harden_process();
+
     Application::new()
         .with_assets(crate::assets::Assets)
         .run(|cx: &mut App| {
