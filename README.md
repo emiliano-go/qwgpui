@@ -1,29 +1,21 @@
 # Vault
 
-A small, native, keyboard-first Bitwarden frontend for Linux. Built with Rust and
-[GPUI](https://gpui.rs), using [`rbw`](https://github.com/doy/rbw) as the vault
-engine and the system clipboard for autofill. No Electron, no WebView, no browser
-automation, no simulated typing.
-
-## Why rbw is a subprocess
-
-`rbw` is a binary with a private agent protocol, not a stable library. Vault runs
-it with `std::process::Command`/`tokio::process::Command`, passes explicit
-arguments (no shell), and parses JSON from `rbw list --raw` and `rbw get --raw`.
-All of it is hidden behind the `backend::VaultProvider` trait so another provider
-can be added later.
-
-Vault never talks to Bitwarden directly and never implements cryptography or
-synchronization. `rbw` remains the source of truth and owns locking.
+Native Linux Bitwarden client built with Rust and [GPUI](https://gpui.rs). It
+uses [`rbw`](https://github.com/doy/rbw) for vault operations and the system
+clipboard for autofill. No Electron, no browser engine, no simulated typing.
 
 ## Requirements
 
 - Arch Linux: `sudo pacman -S rbw`
-- A working `rbw` setup (`rbw config set email ...`, then `rbw register` for the
-  official server, `rbw sync`, `rbw unlock`)
-- Wayland or X11 (GPUI picks the available backend)
-- A pinentry program `rbw` can use. Unlocking from a GUI may need a graphical
-  pinentry (`pinentry-gtk`, `pinentry-qt`, …) or launching Vault from a terminal.
+- A configured rbw setup:
+  ```sh
+  rbw config set email you@example.com
+  rbw sync
+  rbw unlock
+  ```
+- Wayland or X11
+- A pinentry program rbw can use. A graphical pinentry is easier when Vault is
+  started from the desktop.
 
 ## Build and install
 
@@ -34,45 +26,42 @@ install -Dm644 resources/vault.desktop ~/.local/share/applications/vault.desktop
 install -Dm644 resources/vault.svg ~/.local/share/icons/hicolor/scalable/apps/vault.svg
 ```
 
-Run with `vault`, or `cargo run` during development.
+Run with `vault`, or use `cargo run` while developing.
 
 ## Interface
 
-The layout and tokens follow the Aster Qt client: a 64px top bar with brand,
-search and one primary action; a 248px sidebar with account card, sections and
-counts; a dense middle list with filter chips; a 480px reader-style details
-panel; and a 30px status footer. Dark uses the Aster Dark tokens, light uses
-Kestrel Light. Icons are embedded 16px line SVGs, not glyphs or emoji.
+The interface follows Aster Qt: a top bar, a sidebar with account and filters,
+a searchable list, a details reader, and a status footer. The default theme
+follows the desktop light or dark preference and updates live. Dark uses Aster
+Dark tokens and light uses Kestrel Light. Icons are embedded SVG line icons.
 
-## Keyboard shortcuts
+## Shortcuts
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+K` / `Ctrl+F` | Focus search (clears the query) |
-| `Ctrl+C` | Copy the default field (password by default) |
+| `Ctrl+K` or `Ctrl+F` | Focus search |
+| `Ctrl+C` | Copy default field |
 | `Ctrl+Shift+C` | Copy password |
 | `Ctrl+Shift+U` | Copy username |
-| `Ctrl+Shift+T` | Copy current TOTP code |
+| `Ctrl+Shift+T` | Copy TOTP |
 | `Ctrl+G` | Password generator |
 | `Ctrl+,` | Settings |
 | `Ctrl+D` | Toggle favorite |
-| `Ctrl+R` | Synchronize vault |
-| `Enter` | Open selected entry / unlock when locked |
-| `↑` / `↓` / `Tab` | Move selection |
-| `Escape` | Close details, or leave settings/generator, or clear search |
+| `Ctrl+R` | Sync vault |
+| `Enter` | Open entry or unlock |
+| `Up`, `Down`, `Tab` | Move selection |
+| `Escape` | Close details or clear search |
 
-Shortcuts live in `config.toml` and are read at startup.
+Shortcuts are read from `config.toml`.
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/vault/config.toml` (usually `~/.config/vault/config.toml`):
+Config lives at `~/.config/vault/config.toml`.
 
 ```toml
-theme = "system"               # system | dark | light
-clipboard_timeout_secs = 30    # 0 disables timed clearing
+theme = "system"                # system | dark | light
+clipboard_timeout_secs = 30     # 0 disables clearing
 clear_clipboard_on_exit = true
-start_minimized = false        # stored; needs a tray/daemon to take effect
-launch_at_login = false
 default_copy_field = "password" # username | password | totp
 favorites_first = true
 rbw_path = "rbw"
@@ -100,57 +89,43 @@ words = 5
 separator = "-"
 ```
 
-Favorites are stored separately in `~/.config/vault/favorites.json` as item IDs
-only. No vault contents are ever persisted.
+Favorites are stored in `~/.config/vault/favorites.json` as item IDs only. Vault
+never writes vault contents to disk.
 
-## Security model
+## Security
 
-- Master passwords are never requested by Vault and never stored; `rbw`/pinentry
-  handles unlocking.
-- Only non-secret metadata (`id`, `name`, `username`, URLs, folder, type) is
-  loaded up front. Passwords and notes are fetched on demand with
-  `rbw get <id> --raw`.
-- TOTP codes come from `rbw code <id>`; the TOTP secret is never retained.
-- `Secret` values redact themselves in `Debug` output and are zeroized on drop.
-- Passwords and notes are masked by default; revealing requires an explicit click.
-- The clipboard is cleared after the configured timeout only if it still contains
-  the exact value Vault copied. If you copied something else in the meantime,
-  Vault leaves it alone. The same check runs on exit.
-- No shell command strings are constructed and no credential is logged.
+- Vault never asks for or stores the master password. rbw handles locking.
+- Only metadata is loaded up front. Passwords and notes are fetched on demand.
+- TOTP codes come from `rbw code`. The TOTP secret is not kept.
+- Secrets are masked by default, redacted in debug output, and zeroized on drop.
+- The clipboard is cleared only if it still holds the exact value Vault copied.
+  A newer value from another app is never overwritten.
+- No shell strings are built and no credentials are logged.
 
-### Clipboard caveat
+Clipboard clearing is best effort. Clipboard managers, history tools, and the
+receiving app may keep a copy. Vault does not claim secure erasure. Set
+`clipboard_timeout_secs = 0` to disable clearing.
 
-Clipboard clearing is best-effort. Wayland/X11 clipboard managers, history
-tools, and the receiving application may retain a copy. Vault does not claim
-secure erasure, and it does not restore previous clipboard contents by default
-(restoration risks reintroducing stale secrets). Set `clipboard_timeout_secs = 0`
-to disable clearing.
+## Limits
 
-## Limitations
+- rbw does not expose favorites, so Vault keeps local favorite IDs.
+- Cards, identities, and SSH keys are listed and searchable. Type-specific
+  fields are not shown yet.
+- `system` uses GTK, GNOME, or KDE settings and updates live. `dark` and `light`
+  pin a theme.
+- Tray, global quick access, and start minimized need a background daemon.
+- Browser integration, focus monitoring, form detection, and typing are out of
+  scope.
 
-- `rbw` does not expose Bitwarden favorites, so favorites are local to Vault
-  (IDs only).
-- Cards, identities, and SSH keys are listed and searchable; this release shows
-  their name, URLs, and notes, not every type-specific field.
-- `theme = "system"` follows the desktop light/dark preference live, using the
-  same GTK/GNOME/KDE sources as aster-qt. `dark` and `light` pin a slot.
-- `start_minimized`, global quick-access shortcuts, and tray integration need a
-  background daemon and are not part of this release. The `ipc` module reserves
-  the boundary.
-- Browser integration, focus monitoring, form detection, and typing are
-  intentionally absent.
-
-## Testing
+## Tests
 
 ```sh
 cargo test
 ```
 
-The tests cover fuzzy matching, rbw JSON parsing/redaction, error
-classification, clipboard exact-match clearing, password generation, and config
-round-tripping.
+Tests cover fuzzy search, rbw JSON parsing and redaction, error mapping,
+clipboard exact-match clearing, password generation, and config round trips.
 
-For manual UI testing without a real vault, point `rbw_path` at a small script
-that answers `--version`, `unlocked`, `list --raw`, `get <id> --raw`, and
-`code <id>` with fixtures, then start Vault with
-`XDG_CONFIG_HOME=/tmp/vault-test`.
+To try the UI without a real vault, point `rbw_path` at a script that answers
+`--version`, `unlocked`, `list --raw`, `get <id> --raw`, and `code <id>`, then
+run with `XDG_CONFIG_HOME=/tmp/vault-test`.
