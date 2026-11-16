@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Vault
+GenericName=Password Manager
+Comment=Native Bitwarden client backed by rbw
+Exec=vault
+Icon=vault
+Terminal=false
+Categories=Utility;Security;
+Keywords=password;bitwarden;vault;credentials;
+StartupWMClass=vault
